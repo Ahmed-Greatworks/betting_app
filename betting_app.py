@@ -4,6 +4,8 @@ import pandas as pd
 import requests
 import joblib
 
+st.set_page_config(page_title="⚽ Betting Prediction MVP", layout="wide")
+
 # ----------------------------
 # Load trained model
 # ----------------------------
@@ -13,6 +15,32 @@ def load_model():
 
 model = load_model()
 API_KEY = "056d14ef7e81f82c5bc90515d2a09128"
+
+def get_team_form_stats(team_id, season=2024, league_id=39):
+    url = "https://v3.football.api-sports.io/teams/statistics"
+    headers = {"x-apisports-key": API_KEY}
+    params = {
+        "team": team_id,
+        "season": season,
+        "league": league_id
+    }
+    
+    try:
+        response = requests.get(url, headers=headers, params=params)
+        response.raise_for_status()
+        stats = response.json()['response']
+        return {
+            "win_rate": stats["fixtures"]["wins"]["total"] / stats["fixtures"]["played"]["total"],
+            "draw_rate": stats["fixtures"]["draws"]["total"] / stats["fixtures"]["played"]["total"],
+            "loss_rate": stats["fixtures"]["loses"]["total"] / stats["fixtures"]["played"]["total"]
+        }
+    except Exception as e:
+        st.error(f"Failed to fetch team stats for team {team_id}: {e}")
+        return {
+            "win_rate": 0.0,
+            "draw_rate": 0.0,
+            "loss_rate": 0.0
+        }
 
 # ----------------------------
 # Fetch today's upcoming matches
@@ -73,30 +101,31 @@ def fetch_odds(fixture_id):
 # Feature Engineering (simple example)
 # ----------------------------
 def prepare_features(df):
-    df["total"] = df["home_odds"] + df["draw_odds"] + df["away_odds"]
-    df["Norm_H"] = df["home_odds"] / df["total"]
-    df["Norm_D"] = df["draw_odds"] / df["total"]
-    df["Norm_A"] = df["away_odds"] / df["total"]
-    df["H_D_ratio"] = df["home_odds"] / df["draw_odds"]
-    df["H_A_ratio"] = df["home_odds"] / df["away_odds"]
-    df["D_A_ratio"] = df["draw_odds"] / df["away_odds"]
-    df["Odds_Spread"] = df[["home_odds", "draw_odds", "away_odds"]].max(axis=1) - df[["home_odds", "draw_odds", "away_odds"]].min(axis=1)
+    feature_rows = []
 
-    # 🔧 Add mock values for the missing features (you can replace with real data later)
-    df["HomeTeamWinRate"] = 0.5
-    df["AwayTeamWinRate"] = 0.5
-    df["RecentForm"] = 0.5
-    df["HomeRecentForm"] = 0.5
-    df["AwayRecentForm"] = 0.5
+    for _, row in df.iterrows():
+        home_stats = get_team_form_stats(row["teams"]["home"]["id"])
+        away_stats = get_team_form_stats(row["teams"]["away"]["id"])
 
-    features = [
-        "Norm_H", "Norm_D", "Norm_A",
-        "H_A_ratio", "D_A_ratio", "H_D_ratio",
-        "Odds_Spread",
-        "HomeTeamWinRate", "AwayTeamWinRate",
-        "RecentForm", "HomeRecentForm", "AwayRecentForm"
-    ]
-    return df[features]
+        features = {
+            "Norm_H": row.get("bookmakers_odds", {}).get("H", 0),
+            "Norm_D": row.get("bookmakers_odds", {}).get("D", 0),
+            "Norm_A": row.get("bookmakers_odds", {}).get("A", 0),
+            "H_A_ratio": row.get("bookmakers_odds", {}).get("H", 1) / (row.get("bookmakers_odds", {}).get("A", 1) + 1e-5),
+            "D_A_ratio": row.get("bookmakers_odds", {}).get("D", 1) / (row.get("bookmakers_odds", {}).get("A", 1) + 1e-5),
+            "H_D_ratio": row.get("bookmakers_odds", {}).get("H", 1) / (row.get("bookmakers_odds", {}).get("D", 1) + 1e-5),
+            "Odds_Spread": abs(row.get("bookmakers_odds", {}).get("H", 0) - row.get("bookmakers_odds", {}).get("A", 0)),
+            "HomeTeamWinRate": home_stats["win_rate"],
+            "AwayTeamWinRate": away_stats["win_rate"],
+            "RecentForm": home_stats["win_rate"] - away_stats["win_rate"],  # crude difference
+            "HomeRecentForm": home_stats["win_rate"],
+            "AwayRecentForm": away_stats["win_rate"]
+        }
+
+        feature_rows.append(features)
+
+    return pd.DataFrame(feature_rows)
+
 
 # ----------------------------
 # Predict + Recommendation
@@ -106,18 +135,13 @@ def make_predictions(df):
     preds = model.predict(X)
     df["prediction"] = preds
     df["recommended_bet"] = df["prediction"].map({
-        "H": "Bet Home",
-        "D": "Bet Draw",
-        "A": "Bet Away"
+        0: "Bet Home",
+        1: "Bet Draw",
+        2: "Bet Away"
     })
     return df
 
-# ----------------------------
-# Streamlit Layout
-# ----------------------------
-st.set_page_config(page_title="Betting Predictor MVP", layout="wide")
-st.title("⚽ Betting Prediction MVP")
-st.markdown("Live match predictions with model-backed betting suggestions.")
+st.markdown("⚽ Live match predictions with model-backed betting suggestions.")
 
 matches_df = fetch_upcoming_matches()
 
